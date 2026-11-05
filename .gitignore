@@ -16,3 +16,4 @@ Thumbs.db
 # Client downloaded files (preserve folder structure with .gitkeep)
 client/downloads/*
 !client/downloads/.gitkeep
+

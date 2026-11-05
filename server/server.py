@@ -1,0 +1,222 @@
+"""
+NexusStream - Central Multi-Threaded Collaboration Server.
+Handles TCP signaling, user authentication, message routing, UDP file transfer signaling, and heartbeat tracking.
+"""
+
+import socket
+import threading
+import logging
+import time
+import os
+import sys
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from protocol.packet import Packet, MsgType, PacketFlags, send_packet, recv_packet
+from server.user_manager import UserManager
+
+logger = logging.getLogger("CollaborationServer")
+
+
+class CollaborationServer:
+    """Central server managing client connections, authentication, and routing."""
+    def __init__(self, host="0.0.0.0", tcp_port=8888, udp_port=8889, verbose=True):
+        self.host = host
+        self.tcp_port = tcp_port
+        self.udp_port = udp_port
+        self.verbose = verbose
+
+        self.tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.tcp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+        self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        self.user_manager = UserManager()
+        self.running = False
+
+    def _log(self, msg):
+        """Print concise event status to terminal."""
+        if self.verbose:
+            print(msg, flush=True)
+
+    def start(self):
+        """Start listening on TCP and UDP sockets and begin accepting clients."""
+        self.running = True
+        self.tcp_sock.bind((self.host, self.tcp_port))
+        self.tcp_sock.listen(50)
+        self.udp_sock.bind((self.host, self.udp_port))
+
+        threading.Thread(target=self._heartbeat_watchdog, name="Watchdog-Worker", daemon=True).start()
+
+        self._log(f"[Server] Listening on {self.host} (TCP: {self.tcp_port}, UDP: {self.udp_port})")
+        try:
+            while self.running:
+                try:
+                    client_sock, client_addr = self.tcp_sock.accept()
+                    threading.Thread(
+                        target=self._handle_client,
+                        args=(client_sock, client_addr),
+                        name=f"Client-{client_addr[0]}:{client_addr[1]}",
+                        daemon=True
+                    ).start()
+                except (socket.timeout, OSError):
+                    if not self.running:
+                        break
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.stop()
+
+    def stop(self):
+        """Shut down the server and close all open sockets."""
+        if not self.running:
+            return
+        self.running = False
+        for s in (self.tcp_sock, self.udp_sock):
+            try:
+                s.close()
+            except Exception:
+                pass
+        self._log("[Server] Stopped.")
+
+    def _broadcast_packet(self, packet, exclude_user=None):
+        """Send a packet to all authenticated online clients."""
+        for session in self.user_manager.get_all_sessions():
+            if exclude_user and session.username == exclude_user:
+                continue
+            try:
+                with session.lock:
+                    send_packet(session.tcp_sock, packet)
+            except Exception as e:
+                logger.debug(f"Failed to send broadcast to {session.username}: {e}")
+
+    def _send_to_user(self, username, packet):
+        """Send a unicast packet to a specific user."""
+        session = self.user_manager.get_user(username)
+        if not session:
+            return False
+        try:
+            with session.lock:
+                send_packet(session.tcp_sock, packet)
+            return True
+        except Exception as e:
+            logger.debug(f"Failed to unicast to {username}: {e}")
+            return False
+
+    def _handle_client(self, sock, addr):
+        """Worker thread servicing an individual client connection."""
+        sock.settimeout(60.0)
+        current_user = None
+
+        try:
+            while self.running:
+                try:
+                    packet = recv_packet(sock)
+                except (socket.timeout, ConnectionResetError, BrokenPipeError, EOFError, OSError):
+                    break
+                except ValueError:
+                    continue
+
+                msg_type = packet.msg_type
+
+                # 1. TCP Handshake (Step 2)
+                if msg_type == MsgType.HANDSHAKE_REQ:
+                    ack = Packet.json_payload(MsgType.HANDSHAKE_ACK, {"server": "CO3093-RelayServer", "udp_port": self.udp_port})
+                    send_packet(sock, ack)
+
+                # 2. Authentication & Login (Step 3)
+                elif msg_type == MsgType.AUTH_LOGIN:
+                    login_data = packet.to_json()
+                    username = login_data.get("username", "").strip()
+                    udp_port = login_data.get("udp_port", 0)
+
+                    if not username:
+                        send_packet(sock, Packet.json_payload(MsgType.AUTH_FAILURE, {"reason": "Username cannot be empty"}))
+                        continue
+
+                    session = self.user_manager.add_user(username, sock, addr, udp_port)
+                    if not session:
+                        send_packet(sock, Packet.json_payload(MsgType.AUTH_FAILURE, {"reason": "Username already taken"}))
+                    else:
+                        current_user = username
+                        self._log(f"[+] '{username}' joined")
+                        send_packet(sock, Packet.json_payload(MsgType.AUTH_SUCCESS, {"username": username, "users": self.user_manager.get_all_users()}))
+                        session.authenticated = True
+                        self._broadcast_packet(Packet.json_payload(MsgType.USER_JOINED, {"username": username, "ip": addr[0], "udp_port": udp_port}), exclude_user=username)
+
+                # 3. Broadcast Messaging (Step 5 & 8 - Zero-Knowledge E2EE Relay)
+                elif msg_type == MsgType.MSG_BROADCAST:
+                    if not current_user: continue
+                    data = packet.to_json()
+                    self._log(f"[Chat] {current_user} (Broadcast)")
+                    data["sender"] = current_user
+                    data["timestamp"] = time.time()
+                    data["is_broadcast"] = True
+                    relay_pkt = Packet.json_payload(MsgType.MSG_BROADCAST, data, flags=packet.flags)
+                    self._broadcast_packet(relay_pkt, exclude_user=current_user)
+                    send_packet(sock, Packet.json_payload(MsgType.MSG_DELIVERY_ACK, {"status": "DELIVERED", "msg_id": packet.seq}))
+
+                # 4. Unicast Messaging (Step 5 & 8 - Zero-Knowledge E2EE Relay)
+                elif msg_type == MsgType.MSG_UNICAST:
+                    if not current_user: continue
+                    data = packet.to_json()
+                    target_user = data.get("target")
+                    self._log(f"[Direct] {current_user} -> {target_user}")
+                    data["sender"] = current_user
+                    data["timestamp"] = time.time()
+                    data["is_broadcast"] = False
+                    relay_pkt = Packet.json_payload(MsgType.MSG_UNICAST, data, flags=packet.flags)
+                    success = self._send_to_user(target_user, relay_pkt)
+                    ack_status = "DELIVERED" if success else "USER_NOT_FOUND"
+                    send_packet(sock, Packet.json_payload(MsgType.MSG_DELIVERY_ACK, {"status": ack_status, "target": target_user}))
+
+                # 5. File Streaming Signaling (Step 6)
+                elif msg_type == MsgType.FILE_ANNOUNCE:
+                    data = packet.to_json()
+                    target_user = data.get("target")
+                    data["sender"] = current_user
+                    self._log(f"[File] {current_user} -> {target_user}: {data.get('filename', '')}")
+                    self._send_to_user(target_user, Packet.json_payload(MsgType.FILE_ANNOUNCE, data))
+
+                # 6. Heartbeat (Step 7)
+                elif msg_type == MsgType.HEARTBEAT_PING:
+                    if current_user:
+                        self.user_manager.update_heartbeat(current_user)
+                    send_packet(sock, Packet(MsgType.HEARTBEAT_PONG, payload=b"PONG"))
+
+                # 7. Disconnect (Step 7)
+                elif msg_type == MsgType.DISCONNECT:
+                    break
+
+        except Exception:
+            pass
+        finally:
+            if current_user:
+                self.user_manager.remove_user(current_user)
+                self._log(f"[-] '{current_user}' left")
+                self._broadcast_packet(Packet.json_payload(MsgType.USER_LEFT, {"username": current_user}))
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    def _heartbeat_watchdog(self):
+        """Periodically purge inactive users who fail to send heartbeats."""
+        while self.running:
+            time.sleep(5.0)
+            stale_users = self.user_manager.cleanup_inactive_users(timeout_sec=15.0)
+            for u in stale_users:
+                self._log(f"[-] '{u}' timed out")
+                self._broadcast_packet(Packet.json_payload(MsgType.USER_LEFT, {"username": u, "reason": "Timeout"}))
+
+
+def main():
+    server = CollaborationServer()
+    try:
+        server.start()
+    except KeyboardInterrupt:
+        server.stop()
+
+
+if __name__ == '__main__':
+    main()

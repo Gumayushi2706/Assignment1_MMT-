@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CO3093 Collaboration Client - Distributed Streaming System</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Top Navigation Bar -->
+    <header class="top-nav">
+      <div class="brand">
+        <div class="brand-logo">⚡</div>
+        <div class="brand-text">
+          <h1>NexusStream</h1>
+        </div>
+      </div>
+
+      <div class="connection-status-panel">
+        <div id="status-indicator" class="status-indicator disconnected">
+          <span class="pulse-dot"></span>
+          <span id="status-text">Disconnected</span>
+        </div>
+
+        <div id="current-user-info" class="user-chip hidden">
+          <span class="avatar" id="my-avatar">U</span>
+          <span class="username" id="my-username">User</span>
+          <span class="badge" id="my-udp-port">UDP: -</span>
+        </div>
+
+        <button id="btn-toggle-connect" class="btn btn-primary" onclick="toggleConnectModal()">
+          Connect
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content Layout -->
+    <main class="main-content">
+      <!-- Left Sidebar: Active Peers -->
+      <aside class="sidebar">
+        <div class="sidebar-header">
+          <h2>Active Peers (<span id="user-count">0</span>)</h2>
+          <button class="btn-icon" title="Refresh Peers" onclick="fetchState()">⟳</button>
+        </div>
+
+        <div class="channel-list">
+          <div class="channel-item active" id="channel-global" onclick="selectChannel('ALL')">
+            <span class="channel-icon">🌐</span>
+            <div class="channel-meta">
+              <span class="channel-name">Global Chat</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="section-title">DIRECT MESSAGES</div>
+        <div class="peers-list" id="peers-container">
+          <div class="empty-hint">No peers connected</div>
+        </div>
+      </aside>
+
+      <!-- Center: Chat Conversation -->
+      <section class="chat-section">
+        <div class="chat-header">
+          <div class="chat-target-info">
+            <span class="chat-icon" id="chat-header-icon">🌐</span>
+            <div>
+              <h2 id="chat-target-name">Global Chat</h2>
+            </div>
+          </div>
+          <div class="security-badge">
+            <span class="lock-icon">🔒</span> AES-256-GCM
+          </div>
+        </div>
+
+        <div class="messages-viewport" id="messages-viewport">
+          <div class="message-notice">Welcome to NexusStream! Connect to start.</div>
+        </div>
+
+        <div class="chat-composer">
+          <input type="text" id="input-message" placeholder="Type a message..." onkeydown="handleChatKey(event)">
+          <button id="btn-send-message" class="btn btn-accent" onclick="sendMessage()">
+            Send <span>➤</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- Right Panel: UDP File Streaming -->
+      <aside class="transfer-panel">
+        <div class="panel-header">
+          <h2>UDP File Streaming</h2>
+        </div>
+
+        <div class="file-send-box">
+          <h3>Send File over UDP</h3>
+          <div class="form-group">
+            <label for="file-target-select">Recipient Peer</label>
+            <select id="file-target-select">
+              <option value="">Select a peer...</option>
+            </select>
+          </div>
+
+          <div class="file-picker-dropzone" onclick="document.getElementById('file-input').click()">
+            <input type="file" id="file-input" style="display: none;" onchange="handleFileSelected(event)">
+            <span class="drop-icon">📁</span>
+            <p id="file-picker-label">Click to select a file</p>
+          </div>
+
+          <button id="btn-send-file" class="btn btn-success full-width" onclick="uploadAndSendFile()" disabled>
+            Start UDP Streaming Transfer
+          </button>
+        </div>
+
+        <div class="active-transfers-header">
+          <h3>Active Transfers</h3>
+        </div>
+
+        <div class="transfers-list" id="transfers-container">
+          <div class="empty-hint">No active transfers</div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <!-- Connection Modal -->
+  <div id="modal-connect" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <h2>Log In</h2>
+
+      <div class="form-group">
+        <label for="input-username">Username</label>
+        <input type="text" id="input-username" placeholder="e.g. Alice or Bob" autofocus onkeydown="if(event.key==='Enter') connectToServer()">
+      </div>
+
+      <div class="form-row">
+        <div class="form-group flex-2">
+          <label for="input-host">Server IP</label>
+          <input type="text" id="input-host" value="127.0.0.1">
+        </div>
+        <div class="form-group flex-1">
+          <label for="input-port">TCP Port</label>
+          <input type="number" id="input-port" value="8888" min="1" max="65535">
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick="toggleConnectModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="connectToServer()">Log In</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
